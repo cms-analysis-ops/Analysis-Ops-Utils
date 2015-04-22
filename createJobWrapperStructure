@@ -1,0 +1,88 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import commands
+from httplib import HTTPException
+
+from RESTInteractions import HTTPRequests
+
+
+def get_condor_schedd(taskname):
+    try:
+        serverhost = sys.argv[2] if len(sys.argv) > 2 else 'cmsweb-testbed.cern.ch'
+        dbinstance = sys.argv[3] if len(sys.argv) > 3 else 'prod'
+        server = HTTPRequests(serverhost, os.environ['X509_USER_PROXY'], os.environ['X509_USER_PROXY'], retry = 2)
+        res = server.get('/crabserver/%s/task' % dbinstance, data = {'workflow' : taskname, 'subresource' : 'search'})[0]
+        index = res['desc']['columns'].index('tm_schedd')
+        return res['result'][index].split('@')[1]
+    except HTTPException, hte:
+        print hte.headers
+        print hte.result
+        sys.exit(1)
+
+def get_spooldir(taskname, schedd):
+    cmd = ('gsissh %s condor_q -const \\\'CRAB_ReqName =?='
+           ' \\"%s\\" \\&\\& TaskType=?=\\"ROOT\\"\\\' -af Iwd ' % (schedd, taskname))
+    print "Getting the spool directory name:", cmd
+    ec, spool = commands.getstatusoutput(cmd)
+    if ec:
+        print "Command failed with exit code", ec, "and stdout:\n\t", spool
+        sys.exit(1)
+    else:
+        print "Spool dir is: ", spool
+
+    return spool
+
+
+if __name__ == '__main__':
+    taskname = sys.argv[1]
+    schedd = get_condor_schedd(taskname)
+    spool = get_spooldir(taskname, schedd)
+
+    ############### Copyting it
+    spoolsplit = spool.split('/')
+    tasknamedir = 'TEST_' + taskname.split(':')[1]
+    paramdict = { 'schedd'        :  schedd,
+                  'tasknamedir'      :  tasknamedir,
+                  'spoolrootdir'  :  os.path.join('/', *spoolsplit[:-1]),
+                  'spooldir'      :  spoolsplit[-1]
+    }
+    cmd = ('gsissh %(schedd)s tar cvzf - -C %(spoolrootdir)s %(spooldir)s'
+           ' | cat > tmp.tgz ; tar xvzf tmp.tgz ; rm -rf tmp.tgz;'
+           ' mv %(spooldir)s %(tasknamedir)s') % paramdict
+    print "Copying the spool directory:", cmd
+    ec, out = commands.getstatusoutput(cmd)
+    if ec:
+        print "Command failed with exit code", ec, "and stdout:\n\t", out
+        sys.exit(1)
+
+    ############## Creating the run_job.sh script
+    with open('%s/run_job.sh' % tasknamedir, 'w') as rj:
+        content = """rm -rf jobReport.json cmsRun-stdout.log edmProvDumpOutput.log jobReportExtract.pickle FrameworkJobReport.xml outfile.root PSet.pkl PSet.py scramOutput.log jobLog.* wmcore_initialized debug CMSSW_5_3_4 process.id run.sh.old
+tar xvzf sandbox.tar.gz
+export PYTHONPATH=~/repos/CRABServer/src/python:$PYTHONPATH
+export _CONDOR_JOB_AD=Job.1.submit
+export X509_USER_PROXY=/tmp/x509up_u8440
+export CRAB3_RUNTIME_DEBUG=TRUE; sh CMSRunAnalysis.sh"""
+        rj.write(content)
+    ############## Creating the run_job_cmscp.sh script
+    with open('%s/run_job_cmscp.sh' % tasknamedir, 'w') as rj:
+        content += """\nEXIT_STATUS=$?
+echo "CMSRunAnalysis.sh complete at $(TZ=GMT date) with exit status $EXIT_STATUS"
+echo "======== CMSRunAnalsysis.sh at $(TZ=GMT date) FINISHING ========"
+mv jobReport.json jobReport.json.1
+export VO_CMS_SW_DIR=/cvmfs/cms.cern.ch
+. $VO_CMS_SW_DIR/cmsset_default.sh
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$VO_CMS_SW_DIR/COMP/slc5_amd64_gcc434/external/openssl/0.9.7m/lib:$VO_CMS_SW_DIR/COMP/slc5_amd64_gcc434/external/bz2lib/1.0.5/lib
+command -v python2.6 > /dev/null
+echo "======== Stageout at $(TZ=GMT date) STARTING ========"
+rm -f wmcore_initialized
+export _CONDOR_JOB_AD=Job.1.submit
+export TEST_CMSCP_NO_STATUS_UPDATE=True
+PYTHONUNBUFFERED=1 ./cmscp.py
+STAGEOUT_EXIT_STATUS=$?
+echo "======== Stageout at $(TZ=GMT date) FINISHING (status $STAGEOUT_EXIT_STATUS) ========\""""
+        rj.write(content)
+
+    print "Please, now copy the job arguments from the joblog. Enclose the last two with '"
