@@ -1,5 +1,9 @@
 #!/usr/bin/env python
 
+#
+# cfr. https://twiki.cern.ch/twiki/bin/view/CMSPublic/Crab3OperatorDebugging#To_run_the_job_wrapper_and_the_s
+#
+
 import os
 import sys
 import commands
